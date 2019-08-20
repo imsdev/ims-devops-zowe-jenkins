@@ -1,0 +1,87 @@
+node {
+  //def app
+  stage('Clone Repository') {
+    checkout scm
+  }
+
+  stage('Setup Environment') {
+    script {
+      withEnv(["PATH+ZOWE=/usr/local/bin"]){
+        sh 'zowe plugins install @zowe/ims'
+      }
+    }
+  }
+
+  stage('Create Zowe Profiles') {
+    script {
+      withEnv(["PATH+ZOWE=/usr/local/bin"]) {
+        // Delete previous ims and zosmf profiles
+        try {
+          sh 'zowe profiles delete zosmf zoweCLI'
+        } catch (Exception e1) {
+          println("Could not find 'zoweCLI' profile")
+        }
+        
+        try {
+          sh 'zowe profiles delete ims localhost'
+        } catch (Exception e1) {
+          println("Could not find 'localhost' profile")
+        }
+                  
+        // Create new profiles
+        sh 'zowe profiles create zosmf-profile zoweCLI --host myZosmfHost --port 10443 --user USER01 --pass password --reject-unauthorized false'
+        sh 'zowe profiles create ims-profile localhost --host localhost --port 9080 --ich myIMSHost --icp 9999 --user admin --password password --plex PLEX1'
+        
+        // Set as the default profile
+        sh 'zowe profiles set ims localhost'
+        sh 'zowe profiles set zosmf zoweCLI'
+      }
+    }
+  }
+  
+  stage('Submit JCL Job') {
+    script {
+      withEnv(["PATH+ZOWE=/usr/local/bin"]) {
+        ZOWE_JOB_SUBMISSION = sh (
+          script: 'zowe jobs submit data-set "USER01.SAMPLE.JCL(IBCMPLNK)"',
+          returnStdout: true
+        ).toString().trim()
+      }
+    }
+  }
+  
+  stage('Verify Output of Job') {
+    script {
+      withEnv(["PATH+ZOWE=/usr/local/bin"]) {
+        println(ZOWE_JOB_SUBMISSION)
+        ZOWE_JOB_SUBMISSION.replaceAll("\n", ":")
+        JOB_ID = ZOWE_JOB_SUBMISSION.split(":")[1].trim().substring(0,8)
+        
+        // Check job status 10 times to see if job successfully completed
+        for (i=0; i<10; i++) {
+          ZOWE_JOB_STATUS = sh (
+            script: 'zowe jobs view jsbj ' + JOB_ID,
+            returnStdout: true
+          ).toString().trim()
+          RETCODE = ZOWE_JOB_STATUS.split(":")[2].trim().substring(0,7)
+          if (RETCODE == "CC 0000" || RETCODE == "CC 0004") {
+            println("SUCCESS")
+            currentBuild.result = 'SUCCESS'
+            return
+          }
+          sleep(time:1,unit:"SECONDS")
+        }
+        error('Job did not successfully build in the allotted time.')
+      }
+    }
+  }
+  
+  stage('Refresh IMS Region') {
+    script {
+      withEnv(["PATH+ZOWE=/usr/local/bin"]) {
+        sh 'zowe ims stop region -—job-name IMSOMPR1'
+        sh 'zowe ims start region IMSOMPR1' 
+      }
+    }
+  }
+}
